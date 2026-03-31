@@ -134,4 +134,19 @@ namespace MySocketTests
         }
 
     };
+
+    TEST_CLASS(ConfigurationConsistencyTests)
+    {
+    public:
+
+        TEST_METHOD(SetType_MultipleUpdates_LastValueStored)
+        {
+            MySocket sock(CLIENT, "127.0.0.1", 5000, TCP, 1024);
+
+            sock.SetType(SERVER);
+            sock.SetType(CLIENT);
+
+            Assert::AreEqual(static_cast<int>(CLIENT), static_cast<int>(sock.GetType()));
+        }
+    };
 }
