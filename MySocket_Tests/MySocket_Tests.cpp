@@ -147,11 +147,7 @@ namespace MySocketTests
         }
     };
 
-    // --------------------------------------------------------
-    // Server connection tests
-    // These only pass when the simulator is running and you
-    // are connected to the Conestoga VPN.
-    // --------------------------------------------------------
+  
     TEST_CLASS(ServerConnectionTests)
     {
     public:
