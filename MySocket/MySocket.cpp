@@ -160,35 +160,148 @@ MySocket::~MySocket()
 
 void MySocket::ConnectTCP()
 {
-    // TODO: Person 2
-    // Guard: do nothing if connectionType == UDP
-    // CLIENT: call connect() on ConnectionSocket using SvrAddr, set bTCPConnect = true
-    // SERVER: call accept() on WelcomeSocket, store result in ConnectionSocket, set bTCPConnect = true
+    // Guard: only valid for TCP
+    if (connectionType != TCP)
+    {
+        std::cerr << "ConnectTCP: not a TCP socket." << std::endl;
+        return;
+    }
+
+    if (mySocket == CLIENT)
+    {
+        // Connect the client socket to the server address
+        if (connect(ConnectionSocket, (struct sockaddr*)&SvrAddr, sizeof(SvrAddr)) == SOCKET_ERROR)
+        {
+            std::cerr << "ConnectTCP: connect() failed. Error: " << WSAGetLastError() << std::endl;
+            return;
+        }
+        bTCPConnect = true;
+    }
+    else // SERVER
+    {
+        // Block until a client connects; store the resulting socket
+        ConnectionSocket = accept(WelcomeSocket, nullptr, nullptr);
+        if (ConnectionSocket == INVALID_SOCKET)
+        {
+            std::cerr << "ConnectTCP: accept() failed. Error: " << WSAGetLastError() << std::endl;
+            return;
+        }
+        bTCPConnect = true;
+    }
 }
 
 void MySocket::DisconnectTCP()
 {
-    // TODO: Person 2
-    // Guard: do nothing if connectionType == UDP or bTCPConnect == false
-    // Call shutdown() then closesocket() on ConnectionSocket
-    // For SERVER: re-open a fresh ConnectionSocket ready for the next accept()
-    // Set bTCPConnect = false
+    // Guard: only valid for an active TCP connection
+    if (connectionType != TCP)
+    {
+        std::cerr << "DisconnectTCP: not a TCP socket." << std::endl;
+        return;
+    }
+    if (!bTCPConnect)
+    {
+        std::cerr << "DisconnectTCP: no active TCP connection." << std::endl;
+        return;
+    }
+
+    // Gracefully shut down both directions, then close
+    shutdown(ConnectionSocket, SD_BOTH);
+    closesocket(ConnectionSocket);
+    ConnectionSocket = INVALID_SOCKET;
+    bTCPConnect = false;
+
+    if (mySocket == SERVER)
+    {
+        // Re-open a fresh socket so the server can accept the next client
+        ConnectionSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (ConnectionSocket == INVALID_SOCKET)
+        {
+            std::cerr << "DisconnectTCP: failed to re-create server ConnectionSocket. Error: "
+                << WSAGetLastError() << std::endl;
+        }
+    }
 }
 
 void MySocket::SendData(const char* data, int size)
 {
-    // TODO: Person 2
-    // TCP: call send() on ConnectionSocket
-    // UDP Client: call sendto() using SvrAddr
-    // UDP Server: call sendto() using the client address captured during GetData()
+    if (data == nullptr || size <= 0)
+    {
+        std::cerr << "SendData: invalid data or size." << std::endl;
+        return;
+    }
+
+    if (connectionType == TCP)
+    {
+        // TCP: send over the established connection
+        int bytesSent = send(ConnectionSocket, data, size, 0);
+        if (bytesSent == SOCKET_ERROR)
+        {
+            std::cerr << "SendData (TCP): send() failed. Error: " << WSAGetLastError() << std::endl;
+        }
+    }
+    else // UDP
+    {
+        if (mySocket == CLIENT)
+        {
+            // UDP Client: send to the server address stored in SvrAddr
+            int bytesSent = sendto(ConnectionSocket, data, size, 0,
+                (struct sockaddr*)&SvrAddr, sizeof(SvrAddr));
+            if (bytesSent == SOCKET_ERROR)
+            {
+                std::cerr << "SendData (UDP Client): sendto() failed. Error: "
+                    << WSAGetLastError() << std::endl;
+            }
+        }
+        else // UDP SERVER
+        {
+            // UDP Server: reply to the client address captured in GetData()
+            int bytesSent = sendto(ConnectionSocket, data, size, 0,
+                (struct sockaddr*)&ClientAddr, sizeof(ClientAddr));
+            if (bytesSent == SOCKET_ERROR)
+            {
+                std::cerr << "SendData (UDP Server): sendto() failed. Error: "
+                    << WSAGetLastError() << std::endl;
+            }
+        }
+    }
 }
 
 int MySocket::GetData(char* dest)
 {
-    // TODO: Person 2
-    // TCP: call recv() into Buffer, copy to dest, return byte count
-    // UDP: call recvfrom() into Buffer, copy to dest, return byte count
-    return 0;
+    if (dest == nullptr)
+    {
+        std::cerr << "GetData: null destination pointer." << std::endl;
+        return 0;
+    }
+
+    int bytesReceived = 0;
+
+    if (connectionType == TCP)
+    {
+        // TCP: receive into the internal buffer
+        bytesReceived = recv(ConnectionSocket, Buffer, MaxSize, 0);
+        if (bytesReceived == SOCKET_ERROR)
+        {
+            std::cerr << "GetData (TCP): recv() failed. Error: " << WSAGetLastError() << std::endl;
+            return 0;
+        }
+    }
+    else // UDP
+    {
+        // UDP: receive and capture the sender's address for later SendData replies
+        int addrLen = sizeof(ClientAddr);
+        bytesReceived = recvfrom(ConnectionSocket, Buffer, MaxSize, 0,
+            (struct sockaddr*)&ClientAddr, &addrLen);
+        if (bytesReceived == SOCKET_ERROR)
+        {
+            std::cerr << "GetData (UDP): recvfrom() failed. Error: " << WSAGetLastError() << std::endl;
+            return 0;
+        }
+    }
+
+    // Copy received bytes into the caller's destination buffer
+    memcpy(dest, Buffer, bytesReceived);
+    return bytesReceived;
 }
 
 std::string MySocket::GetIPAddr()

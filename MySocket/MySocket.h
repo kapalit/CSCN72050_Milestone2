@@ -29,6 +29,7 @@ private:
     SOCKET             WelcomeSocket;    // TCP server listening socket (accepts incoming connections)
     SOCKET             ConnectionSocket; // Active communication socket (TCP & UDP)
     struct sockaddr_in SvrAddr;          // Stores server address and port information
+    struct sockaddr_in ClientAddr;
     SocketType         mySocket;         // CLIENT or SERVER
     std::string        IPAddr;           // IPv4 address string
     int                Port;             // Port number
