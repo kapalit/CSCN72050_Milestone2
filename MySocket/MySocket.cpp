@@ -1,3 +1,4 @@
+
 #include "MySocket.h"
 #include <iostream>
 
@@ -306,36 +307,68 @@ int MySocket::GetData(char* dest)
 
 std::string MySocket::GetIPAddr()
 {
-    // TODO: Person 3
-    return "";
+    
+    return IPAddr;
 }
 
 void MySocket::SetIPAddr(std::string ip)
 {
-    // TODO: Person 3
-    // Print error and return if bTCPConnect == true
+    // Prevent change if TCP connection is active
+    if (bTCPConnect)
+    {
+        std::cerr << "SetIPAddr error: Cannot change IP address while TCP connection is active." << std::endl;
+        return;
+    }
+
+    // Update stored IP address
+    IPAddr = ip;
+
+    // Update socket address structure
+    inet_pton(AF_INET, IPAddr.c_str(), &SvrAddr.sin_addr);
 }
 
 void MySocket::SetPort(int port)
 {
-    // TODO: Person 3
-    // Print error and return if bTCPConnect == true
+    // Prevent modification if a TCP connection already exists
+    if (bTCPConnect)
+    {
+        std::cerr << "SetPort error: Cannot change port while TCP connection is active." << std::endl;
+        return;
+    }
+
+    // Update the stored port number
+    Port = port;
+
+    // Update the server address structure with the new port
+    SvrAddr.sin_port = htons((u_short)Port);
 }
 
 int MySocket::GetPort()
 {
-    // TODO: Person 3
-    return 0;
+    // GetPort()
+    // Returns the configured port number used by the socket
+    return Port;
 }
 
 SocketType MySocket::GetType()
 {
-    // TODO: Person 3
-    return CLIENT;
+    // GetType()
+    // Returns whether this socket is configured as client or server
+    return mySocket;
 }
 
 void MySocket::SetType(SocketType type)
 {
-    // TODO: Person 3
+
     // Guard: prevent change if bTCPConnect == true or WelcomeSocket is open
+    // Prevent modification if a connection already exists
+    if (bTCPConnect || WelcomeSocket != INVALID_SOCKET)
+    {
+        std::cerr << "SetType error: Cannot change socket type while connection is active." << std::endl;
+        return;
+    }
+
+    // Update socket type
+    mySocket = type;
 }
+
