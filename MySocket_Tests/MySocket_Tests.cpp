@@ -101,7 +101,6 @@ namespace MySocketTests
     TEST_CLASS(ConfigurationInteractionTests)
     {
     public:
-
         TEST_METHOD(ChangeIPThenPort_PersistsBothValues)
         {
             MySocket sock(CLIENT, "127.0.0.1", 5000, TCP, 1024);
@@ -132,13 +131,11 @@ namespace MySocketTests
 
             Assert::AreEqual(std::string("10.0.0.5"), sock.GetIPAddr());
         }
-
     };
 
     TEST_CLASS(ConfigurationConsistencyTests)
     {
     public:
-
         TEST_METHOD(SetType_MultipleUpdates_LastValueStored)
         {
             MySocket sock(CLIENT, "127.0.0.1", 5000, TCP, 1024);
@@ -147,6 +144,79 @@ namespace MySocketTests
             sock.SetType(CLIENT);
 
             Assert::AreEqual(static_cast<int>(CLIENT), static_cast<int>(sock.GetType()));
+        }
+    };
+
+    // --------------------------------------------------------
+    // Server connection tests
+    // These only pass when the simulator is running and you
+    // are connected to the Conestoga VPN.
+    // --------------------------------------------------------
+    TEST_CLASS(ServerConnectionTests)
+    {
+    public:
+        TEST_METHOD(ConnectTCP_ToSimulator)
+        {
+            MySocket sock(CLIENT, "10.172.41.150", 29000, TCP, 1024);
+
+            int timeout = 3000;
+            setsockopt(sock.GetConnectionSocket(), SOL_SOCKET, SO_RCVTIMEO,
+                (char*)&timeout, sizeof(timeout));
+
+            sock.ConnectTCP();
+
+            // Actually verify the connection succeeded by checking the socket is valid
+            Assert::IsTrue(sock.GetConnectionSocket() != INVALID_SOCKET,
+                L"TCP connection to simulator failed - is the server running?");
+
+            sock.DisconnectTCP();
+        }
+
+        TEST_METHOD(SendReceive_UDP_ToSimulator)
+        {
+            MySocket sock(CLIENT, "10.172.41.150", 29500, UDP, 1024);
+
+            int timeout = 3000;
+            setsockopt(sock.GetConnectionSocket(), SOL_SOCKET, SO_RCVTIMEO,
+                (char*)&timeout, sizeof(timeout));
+
+            const char* msg = "Hello";
+            sock.SendData(msg, 5);
+
+            char response[1024] = {};
+            int bytes = sock.GetData(response);
+
+            // Log what we got back
+            Logger::WriteMessage("UDP bytes received: ");
+            Logger::WriteMessage(std::to_string(bytes).c_str());
+
+            Assert::IsTrue(bytes > 0,
+                L"No UDP response from simulator - is the server running?");
+        }
+
+        TEST_METHOD(TCP_SendData_DoesNotCrash)
+        {
+            MySocket sock(CLIENT, "10.172.41.150", 29000, TCP, 1024);
+
+            int timeout = 3000;
+            setsockopt(sock.GetConnectionSocket(), SOL_SOCKET, SO_RCVTIMEO,
+                (char*)&timeout, sizeof(timeout));
+
+            sock.ConnectTCP();
+
+            Assert::IsTrue(sock.GetConnectionSocket() != INVALID_SOCKET,
+                L"TCP connection failed before SendData");
+
+            const char* msg = "Hello";
+            sock.SendData(msg, 5);
+
+            // Try to read any response
+            char response[1024] = {};
+            int bytes = sock.GetData(response);
+            Logger::WriteMessage("TCP bytes received: ");
+            Logger::WriteMessage(std::to_string(bytes).c_str());
+
+            sock.DisconnectTCP();
         }
     };
 }
