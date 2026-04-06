@@ -8,7 +8,7 @@
 // -------------------------------------------------------
 // Global Enumerations
 // -------------------------------------------------------
-enum SocketType     { CLIENT, SERVER };
+enum SocketType { CLIENT, SERVER };
 enum ConnectionType { TCP, UDP };
 
 // -------------------------------------------------------
@@ -25,10 +25,11 @@ const int DEFAULT_SIZE = 1024;
 class MySocket
 {
 private:
-    char*              Buffer;           // Dynamically allocated RAW communication buffer
+    char* Buffer;           // Dynamically allocated RAW communication buffer
     SOCKET             WelcomeSocket;    // TCP server listening socket (accepts incoming connections)
     SOCKET             ConnectionSocket; // Active communication socket (TCP & UDP)
     struct sockaddr_in SvrAddr;          // Stores server address and port information
+    struct sockaddr_in ClientAddr;
     SocketType         mySocket;         // CLIENT or SERVER
     std::string        IPAddr;           // IPv4 address string
     int                Port;             // Port number
@@ -53,6 +54,7 @@ public:
     std::string GetIPAddr();
     int         GetPort();
     SocketType  GetType();
+    SOCKET      GetConnectionSocket() { return ConnectionSocket; }
 
     // Setters (blocked if a TCP connection is already established)
     void SetIPAddr(std::string);

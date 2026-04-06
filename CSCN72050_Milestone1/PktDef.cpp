@@ -205,12 +205,8 @@ char *PktDef::GenPacket()
         std::memcpy(RawBuffer + HEADERSIZE, cmdPacket.Data, bodyLength);
     }
 
-    // Always recalculate CRC before placing it in the packet
-    // This ensures the CRC is correct even if CalcCRC() was not called manually
-    CalcCRC();
-
-    // Copy CRC as last byte
-    RawBuffer[totalLength - 1] = cmdPacket.CRC;
+    // Place CRC after the body
+    RawBuffer[HEADERSIZE + bodyLength] = cmdPacket.CRC;
 
     return RawBuffer;
 }
