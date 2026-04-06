@@ -564,7 +564,7 @@ window.addEventListener('load', () => {
 // =============================================================
 // main()
 // =============================================================
-int main()
+int main(int argc, char* argv[])
 {
     crow::SimpleApp app;
 
@@ -767,10 +767,15 @@ int main()
     // ----------------------------------------------------------
     // Launch the server
     // ----------------------------------------------------------
-    std::cout << "COIL Robot C2 GUI  –  http://localhost:8080/" << std::endl;
+    // Port can be overridden via command-line argument: WebServer.exe 9000
+    uint16_t serverPort = 8081;
+    if (argc > 1)
+        serverPort = static_cast<uint16_t>(std::atoi(argv[1]));
+
+    std::cout << "COIL Robot C2 GUI  –  http://localhost:" << serverPort << "/" << std::endl;
     std::cout << "Press Ctrl+C to stop." << std::endl;
 
-    app.port(8080)
+    app.port(serverPort)
        .multithreaded()
        .run();
 
