@@ -46,10 +46,11 @@
 // =============================================================
 // Global shared state
 // =============================================================
-static std::string  g_robotIP    = "";
-static int          g_robotPort  = 0;
-static MySocket*    g_socket     = nullptr;
-static std::mutex   g_socketMtx;
+static std::string     g_robotIP    = "";
+static int             g_robotPort  = 0;
+static MySocket*       g_socket     = nullptr;
+static std::mutex      g_socketMtx;
+static ConnectionType  g_connType   = UDP;  // tracks current protocol for teammates
 
 // Rolling packet log (up to 200 entries, newest last)
 static std::vector<std::string> g_packetLog;
@@ -292,6 +293,14 @@ static const std::string GUI_HTML = R"HTML(<!DOCTYPE html>
           <input type="number" id="portInput" value="5000" min="1" max="65535">
         </div>
       </div>
+      <div style="display:flex;gap:16px;margin-bottom:10px;font-size:.85rem">
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer">
+          <input type="radio" name="proto" value="udp" checked> UDP
+        </label>
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer">
+          <input type="radio" name="proto" value="tcp"> TCP
+        </label>
+      </div>
       <button class="btn-primary" style="width:100%" onclick="connectRobot()">Connect</button>
     </div>
 
@@ -401,27 +410,28 @@ function clearLog() {
 // Connect to robot  –  POST /connect/<ip>/<port>
 // ======================================================
 async function connectRobot() {
-  const ip   = document.getElementById('ipInput').value.trim();
-  const port = parseInt(document.getElementById('portInput').value);
+  const ip    = document.getElementById('ipInput').value.trim();
+  const port  = parseInt(document.getElementById('portInput').value);
+  const proto = document.querySelector('input[name="proto"]:checked').value; // "udp" or "tcp"
 
   if (!ip || isNaN(port) || port < 1 || port > 65535) {
     alert('Please enter a valid IP address and port number.');
     return;
   }
 
-  setStatus('connecting', 'Connecting to ' + ip + ':' + port + '…');
-  addLog('Sending POST /connect/' + ip + '/' + port, 'send');
+  setStatus('connecting', 'Connecting to ' + ip + ':' + port + ' (' + proto.toUpperCase() + ')…');
+  addLog('Sending POST /connect/' + ip + '/' + port + '?type=' + proto, 'send');
 
   try {
-    const res = await fetch(BASE + '/connect/' + encodeURIComponent(ip) + '/' + port, {
+    const res = await fetch(BASE + '/connect/' + encodeURIComponent(ip) + '/' + port + '?type=' + proto, {
       method: 'POST'
     });
     const data = await res.json();
 
     if (data.simulator === 'reachable') {
-      setStatus('connected', 'Connected to ' + data.ip + ':' + data.port);
-      addLog('Connected OK – simulator responded at ' + data.ip + ':' + data.port, 'ack');
-      showResponse('Simulator is reachable at ' + data.ip + ':' + data.port);
+      setStatus('connected', 'Connected to ' + data.ip + ':' + data.port + ' (' + (data.protocol||'UDP') + ')');
+      addLog('Connected OK – ' + (data.protocol||'UDP') + ' – ' + data.message, 'ack');
+      showResponse(data.message + '\nIP: ' + data.ip + '  Port: ' + data.port + '  Protocol: ' + (data.protocol||'UDP'));
     } else if (data.simulator === 'no_response') {
       setStatus('', 'No response from simulator');
       addLog('Socket created but simulator did not respond – check IP/port/VPN', 'nack');
@@ -581,13 +591,23 @@ int main()
     // ----------------------------------------------------------
     CROW_ROUTE(app, "/connect/<string>/<int>")
     .methods(crow::HTTPMethod::Post)
-    ([](const std::string& ip, int port)
+    ([](const crow::request& req, const std::string& ip, int port)
     {
         std::lock_guard<std::mutex> lk(g_socketMtx);
 
+        // Read optional ?type=tcp or ?type=udp query parameter (default UDP)
+        auto typeParam  = req.url_params.get("type");
+        bool useTCP     = (typeParam && std::string(typeParam) == "tcp");
+        ConnectionType connType = useTCP ? TCP : UDP;
+
         // Tear down any previous connection
-        delete g_socket;
-        g_socket = nullptr;
+        if (g_socket)
+        {
+            if (g_connType == TCP)
+                g_socket->DisconnectTCP();
+            delete g_socket;
+            g_socket = nullptr;
+        }
 
         // Validate inputs
         if (ip.empty() || port <= 0 || port > 65535)
@@ -597,58 +617,70 @@ int main()
             return crow::response(400, err);
         }
 
-        // Create a UDP CLIENT socket pointed at the robot
         g_robotIP   = ip;
         g_robotPort = port;
-        g_socket    = new MySocket(CLIENT, ip, (unsigned int)port, UDP, 1024);
+        g_connType  = connType;
+        g_socket    = new MySocket(CLIENT, ip, (unsigned int)port, connType, 1024);
 
-        // ----------------------------------------------------------
-        // Probe the simulator: set a 2-second receive timeout, send
-        // a Status request packet, and wait for any reply.
-        // UDP is connectionless so "connected" means nothing without
-        // an actual round-trip response from the simulator.
-        // ----------------------------------------------------------
-        DWORD tvMs = 2000;
-        setsockopt(g_socket->GetConnectionSocket(),
-                   SOL_SOCKET, SO_RCVTIMEO,
-                   reinterpret_cast<const char*>(&tvMs), sizeof(tvMs));
+        bool reachable = false;
 
-        // Build a minimal Status-request PktDef (no body, Status bit set)
-        PktDef probe;
-        probe.SetCmd(RESPONSE);
-        probe.SetBodyData(nullptr, 0);
-        probe.SetPktCount(1);
-        char* probeBuf = probe.GenPacket();
-        g_socket->SendData(probeBuf, probe.GetLength());
+        if (useTCP)
+        {
+            // TCP has a real handshake — ConnectTCP() proves reachability
+            // Set a socket-level timeout so it doesn't hang forever
+            DWORD tvMs = 3000;
+            setsockopt(g_socket->GetConnectionSocket(),
+                       SOL_SOCKET, SO_RCVTIMEO,
+                       reinterpret_cast<const char*>(&tvMs), sizeof(tvMs));
 
-        // Try to receive the simulator's reply
-        char recvBuf[1024] = {};
-        int  bytesIn = g_socket->GetData(recvBuf);
+            g_socket->ConnectTCP();   // blocks until connected or error
+            reachable = true;         // if ConnectTCP() returned, connection succeeded
 
-        // Remove the timeout so normal commands don't time out
-        tvMs = 0;
-        setsockopt(g_socket->GetConnectionSocket(),
-                   SOL_SOCKET, SO_RCVTIMEO,
-                   reinterpret_cast<const char*>(&tvMs), sizeof(tvMs));
-
-        bool reachable = (bytesIn > 0);
-        if (reachable)
-            appendLog("Probe OK – simulator responded (" +
-                      std::to_string(bytesIn) + " bytes) at " +
-                      ip + ":" + std::to_string(port));
+            appendLog("TCP connected to " + ip + ":" + std::to_string(port));
+        }
         else
-            appendLog("No probe response from " + ip + ":" +
-                      std::to_string(port) +
-                      " – check IP/port or VPN");
+        {
+            // UDP is connectionless — probe with a Status packet and wait 2 s
+            DWORD tvMs = 2000;
+            setsockopt(g_socket->GetConnectionSocket(),
+                       SOL_SOCKET, SO_RCVTIMEO,
+                       reinterpret_cast<const char*>(&tvMs), sizeof(tvMs));
+
+            PktDef probe;
+            probe.SetCmd(RESPONSE);
+            probe.SetBodyData(nullptr, 0);
+            probe.SetPktCount(1);
+            char* probeBuf = probe.GenPacket();
+            g_socket->SendData(probeBuf, probe.GetLength());
+
+            char recvBuf[1024] = {};
+            int  bytesIn = g_socket->GetData(recvBuf);
+
+            // Remove timeout so normal commands don't time out
+            tvMs = 0;
+            setsockopt(g_socket->GetConnectionSocket(),
+                       SOL_SOCKET, SO_RCVTIMEO,
+                       reinterpret_cast<const char*>(&tvMs), sizeof(tvMs));
+
+            reachable = (bytesIn > 0);
+            if (reachable)
+                appendLog("UDP probe OK – simulator responded (" +
+                          std::to_string(bytesIn) + " bytes) at " +
+                          ip + ":" + std::to_string(port));
+            else
+                appendLog("UDP – no probe response from " + ip + ":" +
+                          std::to_string(port) + " – check IP/port/VPN");
+        }
 
         crow::json::wvalue res;
-        res["status"]    = reachable ? "ok"           : "no_response";
-        res["simulator"] = reachable ? "reachable"    : "no_response";
+        res["status"]    = reachable ? "ok"        : "no_response";
+        res["simulator"] = reachable ? "reachable" : "no_response";
         res["ip"]        = ip;
         res["port"]      = port;
+        res["protocol"]  = useTCP ? "TCP" : "UDP";
         res["message"]   = reachable
-                           ? "Simulator responded – you are connected"
-                           : "Socket created but simulator did not respond – check IP/port/VPN";
+                           ? "Connected via " + std::string(useTCP ? "TCP" : "UDP")
+                           : "No response – check IP/port/VPN";
         return crow::response(reachable ? 200 : 202, res);
     });
 
