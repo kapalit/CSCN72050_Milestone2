@@ -702,25 +702,157 @@ int main(int argc, char* argv[])
     .methods(crow::HTTPMethod::Put)
     ([](const crow::request& req)
     {
-        // TODO: Person 2
-        //
-        // 1. Lock g_socketMtx, confirm g_socket != nullptr.
-        // 2. Parse req.body as JSON to determine cmd type.
-        // 3. Build a PktDef:
-        //      Drive  → SetCmd(DRIVE),  SetBodyData(&driveBody, sizeof(DriveBody))
-        //      Sleep  → SetCmd(SLEEP),  SetBodyData(nullptr, 0)
-        // 4. Call GenPacket() to get the raw buffer + GetLength().
-        // 5. Call g_socket->SendData(buf, len).
-        // 6. Call g_socket->GetData(recvBuf) to read ACK.
-        // 7. Parse ACK PktDef, check GetAck().
-        // 8. appendLog(...) with result.
-        // 9. Return { "ack": true/false, "pktCount": N }.
+        std::lock_guard<std::mutex> lk(g_socketMtx);
 
-        crow::json::wvalue stub;
-        stub["error"]   = "Not implemented – Person 2 TODO";
-        stub["ack"]     = false;
-        stub["pktCount"]= 0;
-        return crow::response(501, stub);
+        crow::json::wvalue out;
+
+        if (g_socket == nullptr)
+        {
+            out["error"] = "Not connected. Call POST /connect/<ip>/<port> first.";
+            out["ack"] = false;
+            out["pktCount"] = 0;
+            appendLog("Telecommand rejected: no socket (not connected)");
+            return crow::response(409, out);
+        }
+
+        // 2. Parse req.body as JSON to determine cmd type.
+        auto body = crow::json::load(req.body);
+        if (!body)
+        {
+            out["error"] = "Invalid JSON body.";
+            out["ack"] = false;
+            out["pktCount"] = 0;
+            appendLog("Telecommand rejected: invalid JSON body");
+            return crow::response(400, out);
+        }
+
+        if (!body.has("cmd") || body["cmd"].t() != crow::json::type::String)
+        {
+            out["error"] = "Missing or invalid 'cmd' field (expected string).";
+            out["ack"] = false;
+            out["pktCount"] = 0;
+            appendLog("Telecommand rejected: missing/invalid cmd");
+            return crow::response(400, out);
+        }
+
+        const std::string cmdStr = body["cmd"].s();
+
+        // 3. Build a PktDef:
+        PktDef pkt;
+        int expectedPktCount = 1; // simulator/probe uses 1; keep it simple/consistent
+        pkt.SetPktCount(expectedPktCount);
+
+        std::string logMsg;
+
+        if (cmdStr == "DRIVE")
+        {
+            // Validate fields
+            if (!body.has("direction") || !body.has("duration") || !body.has("power"))
+            {
+                out["error"] = "DRIVE requires {direction, duration, power}.";
+                out["ack"] = false;
+                out["pktCount"] = 0;
+                appendLog("Telecommand rejected: DRIVE missing fields");
+                return crow::response(400, out);
+            }
+
+            int direction = body["direction"].i();
+            int duration = body["duration"].i(); // UI sends ms, but packet expects 1-byte seconds in DriveBody
+            int power = body["power"].i();
+
+            // Basic sanity checks
+            if (direction < 1 || direction > 4)
+            {
+                out["error"] = "Invalid direction (expected 1..4).";
+                out["ack"] = false;
+                out["pktCount"] = 0;
+                appendLog("Telecommand rejected: invalid direction=" + std::to_string(direction));
+                return crow::response(400, out);
+            }
+
+            // Convert ms -> seconds (at least 1 second if non-zero)
+            int durSec = duration / 1000;
+            if (durSec <= 0) durSec = 1;
+            if (durSec > 255) durSec = 255;
+
+            if (power < 0) power = 0;
+            if (power > 100) power = 100;
+
+            // DriveBody is used for FORWARD/BACKWARD in the milestone code.
+            // We'll still populate it for any direction 1..4; the simulator can decide what to do.
+            DriveBody driveBody{};
+            driveBody.Direction = static_cast<unsigned char>(direction);
+            driveBody.Duration = static_cast<unsigned char>(durSec);
+            driveBody.Power = static_cast<unsigned char>(power);
+
+            pkt.SetCmd(DRIVE);
+            pkt.SetBodyData(reinterpret_cast<char*>(&driveBody), sizeof(DriveBody));
+            pkt.CalcCRC();
+
+            logMsg = "Sending DRIVE dir=" + std::to_string(direction) +
+                " durMs=" + std::to_string(duration) +
+                " (durSec=" + std::to_string(durSec) + ")" +
+                " power=" + std::to_string(power);
+        }
+        else if (cmdStr == "SLEEP")
+        {
+            pkt.SetCmd(SLEEP);
+            pkt.SetBodyData(nullptr, 0);
+            pkt.CalcCRC();
+
+            logMsg = "Sending SLEEP";
+        }
+        else
+        {
+            out["error"] = "Unknown cmd. Expected 'DRIVE' or 'SLEEP'.";
+            out["ack"] = false;
+            out["pktCount"] = 0;
+            appendLog("Telecommand rejected: unknown cmd='" + cmdStr + "'");
+            return crow::response(400, out);
+        }
+
+        // 4. Call GenPacket() to get the raw buffer + GetLength().
+        char* buf = pkt.GenPacket();
+        int   len = pkt.GetLength();
+
+        if (buf == nullptr || len <= 0)
+        {
+            out["error"] = "Failed to generate packet buffer.";
+            out["ack"] = false;
+            out["pktCount"] = 0;
+            appendLog("Telecommand error: GenPacket failed for cmd=" + cmdStr);
+            return crow::response(500, out);
+        }
+
+        // 5. Call g_socket->SendData(buf, len).
+        g_socket->SendData(buf, len);
+
+        // 6. Call g_socket->GetData(recvBuf) to read ACK.
+        char recvBuf[1024] = {};
+        int  bytesIn = g_socket->GetData(recvBuf);
+
+        if (bytesIn <= 0)
+        {
+            out["error"] = "No response/ACK received from simulator.";
+            out["ack"] = false;
+            out["pktCount"] = expectedPktCount;
+            appendLog(logMsg + " → NO ACK (bytesIn=" + std::to_string(bytesIn) + ")");
+            return crow::response(504, out);
+        }
+
+        // 7. Parse ACK PktDef, check GetAck().
+        PktDef ackPkt(recvBuf);
+        bool ack = ackPkt.GetAck();
+
+        // 8. appendLog(...) with result.
+        appendLog(logMsg + " → " + std::string(ack ? "ACK" : "NACK") +
+            " (recvBytes=" + std::to_string(bytesIn) +
+            ", pktCount=" + std::to_string(ackPkt.GetPktCount()) + ")");
+
+        // 9. Return { "ack": true/false, "pktCount": N }.
+        out["ack"] = ack;
+        out["pktCount"] = ackPkt.GetPktCount();
+        return crow::response(200, out);
     });
 
     // ----------------------------------------------------------
