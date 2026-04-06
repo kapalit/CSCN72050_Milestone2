@@ -9,4 +9,7 @@
   <Project Path="MySocket/MySocket.vcxproj" Id="6af0f7e5-b107-42f7-87bc-b190ba089ca5" />
   <Project Path="MySocket_Tests/MySocket_Tests.vcxproj" />
   <Project Path="PktDef_Tests/PktDef_Tests.vcxproj" />
+  <Project Path="WebServer/WebServer.vcxproj" Id="c3b5a7d9-e1f2-4a6b-8c0d-2e4f6a8b0c1d">
+    <BuildDependency Project="MySocket/MySocket.vcxproj" />
+  </Project>
 </Solution>

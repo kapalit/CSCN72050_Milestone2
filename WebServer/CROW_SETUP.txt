@@ -1,0 +1,59 @@
+================================================================
+ WebServer project  –  One-Time Dependency Setup
+================================================================
+
+You need TWO things before this project will compile:
+
+  1.  crow_all.h      (Crow C++ web framework – single header)
+  2.  asio NuGet pkg  (standalone Asio – async I/O backend for Crow)
+
+----------------------------------------------------------------
+STEP 1 – Download crow_all.h
+----------------------------------------------------------------
+a) Open a browser and go to:
+     https://github.com/CrowCpp/Crow/releases
+
+b) Click the latest release (e.g. v1.2.0 or higher).
+
+c) Under "Assets", download the file named:
+     crow_all.h
+
+d) Copy crow_all.h into THIS folder:
+     WebServer\crow_all.h          ← right next to main.cpp
+
+----------------------------------------------------------------
+STEP 2 – Restore the asio NuGet package
+----------------------------------------------------------------
+Visual Studio will do this automatically when you open the
+solution.  If it doesn't:
+
+  • Right-click the solution in Solution Explorer
+  • Choose "Restore NuGet Packages"
+
+The asio package (version 1.28.0) will be downloaded into:
+     packages\asio.1.28.0\include\
+
+  ⚠️  If NuGet installs a different version (e.g. 1.30.0):
+      a) Update packages.config   → change version="1.28.0" to the new version
+      b) Update WebServer.vcxproj → find all occurrences of "asio.1.28.0"
+         and change them to the version you actually have.
+
+----------------------------------------------------------------
+STEP 3 – Build and run
+----------------------------------------------------------------
+a) Set WebServer as the Startup Project (right-click → Set as Startup).
+b) Select  Release | x64  configuration.
+c) Press Ctrl+F5 (or Build → Build Solution, then run manually).
+d) The console will print:
+     COIL Robot C2 GUI – http://localhost:8080/
+e) Open your browser to http://localhost:8080/
+
+----------------------------------------------------------------
+DOCKER DEPLOYMENT (optional – see Dockerfile in solution root)
+----------------------------------------------------------------
+After building Release | x64:
+  docker build -t coil-c2gui .
+  docker run -p 8080:8080 coil-c2gui
+
+Requires Docker Desktop in Windows containers mode.
+================================================================
