@@ -314,9 +314,9 @@ static const std::string GUI_HTML = R"HTML(<!DOCTYPE html>
         <button class="btn-nav" title="Forward"  onclick="sendDrive(1)"  id="btnFwd">&#x2191;</button>
         <div></div>
         <!-- row 2 -->
-        <button class="btn-nav" title="Left"     onclick="sendDrive(3)"  id="btnLeft">&#x2190;</button>
+        <button class="btn-nav" title="Left"     onclick="sendDrive(4)"  id="btnLeft">&#x2190;</button>
         <button class="btn-nav" title="Stop"     onclick="sendSleep()"   id="btnStop">&#x23F9;</button>
-        <button class="btn-nav" title="Right"    onclick="sendDrive(4)"  id="btnRight">&#x2192;</button>
+        <button class="btn-nav" title="Right"    onclick="sendDrive(3)"  id="btnRight">&#x2192;</button>
         <!-- row 3 -->
         <div></div>
         <button class="btn-nav" title="Backward" onclick="sendDrive(2)"  id="btnBwd">&#x2193;</button>
@@ -778,15 +778,27 @@ int main(int argc, char* argv[])
             if (power < 0) power = 0;
             if (power > 100) power = 100;
 
-            // DriveBody is used for FORWARD/BACKWARD in the milestone code.
-            // We'll still populate it for any direction 1..4; the simulator can decide what to do.
-            DriveBody driveBody{};
-            driveBody.Direction = static_cast<unsigned char>(direction);
-            driveBody.Duration = static_cast<unsigned char>(durSec);
-            driveBody.Power = static_cast<unsigned char>(power);
-
             pkt.SetCmd(DRIVE);
-            pkt.SetBodyData(reinterpret_cast<char*>(&driveBody), sizeof(DriveBody));
+
+            // PktDef.h defines two distinct body structs:
+            //   DriveBody  – for FORWARD(1) and BACKWARD(2): Direction, Duration(1-byte), Power
+            //   TurnBody   – for RIGHT(3) and LEFT(4):       Direction, Duration(2-byte unsigned short), no Power
+            if (direction == FORWARD || direction == BACKWARD)
+            {
+                DriveBody driveBody{};
+                driveBody.Direction = static_cast<unsigned char>(direction);
+                driveBody.Duration  = static_cast<unsigned char>(durSec);
+                driveBody.Power     = static_cast<unsigned char>(power);
+                pkt.SetBodyData(reinterpret_cast<char*>(&driveBody), sizeof(DriveBody));
+            }
+            else // RIGHT(3) or LEFT(4)
+            {
+                TurnBody turnBody{};
+                turnBody.Direction = static_cast<unsigned char>(direction);
+                turnBody.Duration  = static_cast<unsigned short>(durSec);
+                pkt.SetBodyData(reinterpret_cast<char*>(&turnBody), sizeof(TurnBody));
+            }
+
             pkt.CalcCRC();
 
             logMsg = "Sending DRIVE dir=" + std::to_string(direction) +
