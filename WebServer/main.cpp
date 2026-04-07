@@ -699,21 +699,75 @@ int main()
     // (Person 3 – implement the body below)
     // ----------------------------------------------------------
     CROW_ROUTE(app, "/telementry_request/")
-    .methods(crow::HTTPMethod::Get)
-    ([](const crow::request&)
-    {
-        // TODO: Person 3
-        //
-        // 1. Lock g_socketMtx, confirm g_socket != nullptr.
-        // 2. Build a PktDef with SetCmd(RESPONSE) / Status flag.
-        // 3. Send via g_socket->SendData().
-        // 4. Await g_socket->GetData() → parse as PktDef.
-        // 5. Extract housekeeping fields and return as JSON.
+        .methods(crow::HTTPMethod::Get)
+        ([](const crow::request&)
+            {
+                std::lock_guard<std::mutex> lk(g_socketMtx);
+                if (!g_socket)
+                {
+                    crow::json::wvalue err;
+                    err["error"] = "No robot connection. POST /connect/ first.";
+                    return crow::response(400, err);
+                }
 
-        crow::json::wvalue stub;
-        stub["error"] = "Not implemented – Person 3 TODO";
-        return crow::response(501, stub);
-    });
+                // 1. Build Status request (Status flag = 1)
+                PktDef statusReq;
+                statusReq.SetCmd(RESPONSE);  // Sets Status bit
+                statusReq.SetBodyData(nullptr, 0);
+                statusReq.CalcCRC();         // Calculate CRC
+                statusReq.SetPktCount(1);
+
+                char* reqBuf = statusReq.GenPacket();
+                g_socket->SendData(reqBuf, statusReq.GetLength());
+
+                // 2. Receive housekeeping response
+                char recvBuf[1024] = {};
+                int bytes = g_socket->GetData(recvBuf);
+
+                if (bytes <= 0)
+                {
+                    crow::json::wvalue err;
+                    err["error"] = "No response from robot";
+                    return crow::response(408, err);
+                }
+
+                // 3. Parse response packet
+                PktDef responsePkt(recvBuf);  // Your constructor!
+
+                // 4. Validate CRC
+                bool valid = responsePkt.CheckCRC(recvBuf, bytes);
+
+                appendLog("Telemetry: pkt#" + std::to_string(responsePkt.GetPktCount()) +
+                    " ack=" + std::to_string(responsePkt.GetAck()) +
+                    " valid=" + std::to_string(valid));
+
+                // 5. Return JSON
+                crow::json::wvalue telemetry;
+                telemetry["pktCount"] = responsePkt.GetPktCount();
+                telemetry["ack"] = responsePkt.GetAck();
+                telemetry["validCRC"] = valid;
+                telemetry["length"] = responsePkt.GetLength();
+                telemetry["cmd"] = static_cast<int>(responsePkt.GetCmd());
+
+                // Body data (if any)
+                char* body = responsePkt.GetBodyData();
+                int bodyLen = responsePkt.GetLength() - HEADERSIZE - 1;
+                if (body && bodyLen > 0)
+                {
+                    telemetry["bodySize"] = bodyLen;
+                    // Hex dump body
+                    std::string hex;
+                    for (int i = 0; i < std::min(16, bodyLen); i++)
+                    {
+                        char h[4];
+                        sprintf_s(h, "%02X ", (unsigned char)body[i]);
+                        hex += h;
+                    }
+                    telemetry["bodyHex"] = hex;
+                }
+
+                return crow::response(200, telemetry);
+            });
 
     // ----------------------------------------------------------
     // GET /routing_table/
@@ -722,15 +776,18 @@ int main()
     // (Person 3 – implement the body below)
     // ----------------------------------------------------------
     CROW_ROUTE(app, "/routing_table/")
-    .methods(crow::HTTPMethod::Get)
-    ([](const crow::request&)
-    {
-        // TODO: Person 3
-
-        crow::json::wvalue stub;
-        stub["error"] = "Not implemented – Person 3 TODO";
-        return crow::response(501, stub);
-    });
+        .methods(crow::HTTPMethod::Get)
+        ([](const crow::request&)
+            {
+                crow::json::wvalue routes;
+                routes["primary"] = "localhost:8080";
+                routes["relay"] = "192.168.1.100:8081";  // Second PC
+                routes["robots"] = {
+                    {"robot1", g_robotIP + ":" + std::to_string(g_robotPort)},
+                    {"robot2", "192.168.1.51:5000"}
+                };
+                return crow::response(200, routes);
+            });
 
     // ----------------------------------------------------------
     // Launch the server
