@@ -44,7 +44,8 @@ WORKDIR C:\\app
 COPY x64\\Release\\WebServer.exe .
 
 # Expose the CROW HTTP server port
-EXPOSE 8080
+EXPOSE 8081
 
-# Run the server when the container starts
-CMD ["WebServer.exe"]
+# Run the server on the team's claimed port (8081)
+# To override: docker run -p 8081:8081 coil-c2gui WebServer.exe 8081
+CMD ["WebServer.exe", "8081"]

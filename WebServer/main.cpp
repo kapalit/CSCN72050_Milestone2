@@ -46,10 +46,11 @@
 // =============================================================
 // Global shared state
 // =============================================================
-static std::string  g_robotIP    = "";
-static int          g_robotPort  = 0;
-static MySocket*    g_socket     = nullptr;
-static std::mutex   g_socketMtx;
+static std::string     g_robotIP    = "";
+static int             g_robotPort  = 0;
+static MySocket*       g_socket     = nullptr;
+static std::mutex      g_socketMtx;
+static ConnectionType  g_connType   = UDP;  // tracks current protocol for teammates
 
 // Rolling packet log (up to 200 entries, newest last)
 static std::vector<std::string> g_packetLog;
@@ -292,6 +293,14 @@ static const std::string GUI_HTML = R"HTML(<!DOCTYPE html>
           <input type="number" id="portInput" value="5000" min="1" max="65535">
         </div>
       </div>
+      <div style="display:flex;gap:16px;margin-bottom:10px;font-size:.85rem">
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer">
+          <input type="radio" name="proto" value="udp" checked> UDP
+        </label>
+        <label style="display:flex;align-items:center;gap:5px;cursor:pointer">
+          <input type="radio" name="proto" value="tcp"> TCP
+        </label>
+      </div>
       <button class="btn-primary" style="width:100%" onclick="connectRobot()">Connect</button>
     </div>
 
@@ -305,9 +314,9 @@ static const std::string GUI_HTML = R"HTML(<!DOCTYPE html>
         <button class="btn-nav" title="Forward"  onclick="sendDrive(1)"  id="btnFwd">&#x2191;</button>
         <div></div>
         <!-- row 2 -->
-        <button class="btn-nav" title="Left"     onclick="sendDrive(3)"  id="btnLeft">&#x2190;</button>
+        <button class="btn-nav" title="Left"     onclick="sendDrive(4)"  id="btnLeft">&#x2190;</button>
         <button class="btn-nav" title="Stop"     onclick="sendSleep()"   id="btnStop">&#x23F9;</button>
-        <button class="btn-nav" title="Right"    onclick="sendDrive(4)"  id="btnRight">&#x2192;</button>
+        <button class="btn-nav" title="Right"    onclick="sendDrive(3)"  id="btnRight">&#x2192;</button>
         <!-- row 3 -->
         <div></div>
         <button class="btn-nav" title="Backward" onclick="sendDrive(2)"  id="btnBwd">&#x2193;</button>
@@ -401,27 +410,28 @@ function clearLog() {
 // Connect to robot  –  POST /connect/<ip>/<port>
 // ======================================================
 async function connectRobot() {
-  const ip   = document.getElementById('ipInput').value.trim();
-  const port = parseInt(document.getElementById('portInput').value);
+  const ip    = document.getElementById('ipInput').value.trim();
+  const port  = parseInt(document.getElementById('portInput').value);
+  const proto = document.querySelector('input[name="proto"]:checked').value; // "udp" or "tcp"
 
   if (!ip || isNaN(port) || port < 1 || port > 65535) {
     alert('Please enter a valid IP address and port number.');
     return;
   }
 
-  setStatus('connecting', 'Connecting to ' + ip + ':' + port + '…');
-  addLog('Sending POST /connect/' + ip + '/' + port, 'send');
+  setStatus('connecting', 'Connecting to ' + ip + ':' + port + ' (' + proto.toUpperCase() + ')…');
+  addLog('Sending POST /connect/' + ip + '/' + port + '?type=' + proto, 'send');
 
   try {
-    const res = await fetch(BASE + '/connect/' + encodeURIComponent(ip) + '/' + port, {
+    const res = await fetch(BASE + '/connect/' + encodeURIComponent(ip) + '/' + port + '?type=' + proto, {
       method: 'POST'
     });
     const data = await res.json();
 
     if (data.simulator === 'reachable') {
-      setStatus('connected', 'Connected to ' + data.ip + ':' + data.port);
-      addLog('Connected OK – simulator responded at ' + data.ip + ':' + data.port, 'ack');
-      showResponse('Simulator is reachable at ' + data.ip + ':' + data.port);
+      setStatus('connected', 'Connected to ' + data.ip + ':' + data.port + ' (' + (data.protocol||'UDP') + ')');
+      addLog('Connected OK – ' + (data.protocol||'UDP') + ' – ' + data.message, 'ack');
+      showResponse(data.message + '\nIP: ' + data.ip + '  Port: ' + data.port + '  Protocol: ' + (data.protocol||'UDP'));
     } else if (data.simulator === 'no_response') {
       setStatus('', 'No response from simulator');
       addLog('Socket created but simulator did not respond – check IP/port/VPN', 'nack');
@@ -554,7 +564,7 @@ window.addEventListener('load', () => {
 // =============================================================
 // main()
 // =============================================================
-int main()
+int main(int argc, char* argv[])
 {
     crow::SimpleApp app;
 
@@ -581,13 +591,23 @@ int main()
     // ----------------------------------------------------------
     CROW_ROUTE(app, "/connect/<string>/<int>")
     .methods(crow::HTTPMethod::Post)
-    ([](const std::string& ip, int port)
+    ([](const crow::request& req, const std::string& ip, int port)
     {
         std::lock_guard<std::mutex> lk(g_socketMtx);
 
+        // Read optional ?type=tcp or ?type=udp query parameter (default UDP)
+        auto typeParam  = req.url_params.get("type");
+        bool useTCP     = (typeParam && std::string(typeParam) == "tcp");
+        ConnectionType connType = useTCP ? TCP : UDP;
+
         // Tear down any previous connection
-        delete g_socket;
-        g_socket = nullptr;
+        if (g_socket)
+        {
+            if (g_connType == TCP)
+                g_socket->DisconnectTCP();
+            delete g_socket;
+            g_socket = nullptr;
+        }
 
         // Validate inputs
         if (ip.empty() || port <= 0 || port > 65535)
@@ -597,58 +617,70 @@ int main()
             return crow::response(400, err);
         }
 
-        // Create a UDP CLIENT socket pointed at the robot
         g_robotIP   = ip;
         g_robotPort = port;
-        g_socket    = new MySocket(CLIENT, ip, (unsigned int)port, UDP, 1024);
+        g_connType  = connType;
+        g_socket    = new MySocket(CLIENT, ip, (unsigned int)port, connType, 1024);
 
-        // ----------------------------------------------------------
-        // Probe the simulator: set a 2-second receive timeout, send
-        // a Status request packet, and wait for any reply.
-        // UDP is connectionless so "connected" means nothing without
-        // an actual round-trip response from the simulator.
-        // ----------------------------------------------------------
-        DWORD tvMs = 2000;
-        setsockopt(g_socket->GetConnectionSocket(),
-                   SOL_SOCKET, SO_RCVTIMEO,
-                   reinterpret_cast<const char*>(&tvMs), sizeof(tvMs));
+        bool reachable = false;
 
-        // Build a minimal Status-request PktDef (no body, Status bit set)
-        PktDef probe;
-        probe.SetCmd(RESPONSE);
-        probe.SetBodyData(nullptr, 0);
-        probe.SetPktCount(1);
-        char* probeBuf = probe.GenPacket();
-        g_socket->SendData(probeBuf, probe.GetLength());
+        if (useTCP)
+        {
+            // TCP has a real handshake — ConnectTCP() proves reachability
+            // Set a socket-level timeout so it doesn't hang forever
+            DWORD tvMs = 3000;
+            setsockopt(g_socket->GetConnectionSocket(),
+                       SOL_SOCKET, SO_RCVTIMEO,
+                       reinterpret_cast<const char*>(&tvMs), sizeof(tvMs));
 
-        // Try to receive the simulator's reply
-        char recvBuf[1024] = {};
-        int  bytesIn = g_socket->GetData(recvBuf);
+            g_socket->ConnectTCP();   // blocks until connected or error
+            reachable = true;         // if ConnectTCP() returned, connection succeeded
 
-        // Remove the timeout so normal commands don't time out
-        tvMs = 0;
-        setsockopt(g_socket->GetConnectionSocket(),
-                   SOL_SOCKET, SO_RCVTIMEO,
-                   reinterpret_cast<const char*>(&tvMs), sizeof(tvMs));
-
-        bool reachable = (bytesIn > 0);
-        if (reachable)
-            appendLog("Probe OK – simulator responded (" +
-                      std::to_string(bytesIn) + " bytes) at " +
-                      ip + ":" + std::to_string(port));
+            appendLog("TCP connected to " + ip + ":" + std::to_string(port));
+        }
         else
-            appendLog("No probe response from " + ip + ":" +
-                      std::to_string(port) +
-                      " – check IP/port or VPN");
+        {
+            // UDP is connectionless — probe with a Status packet and wait 2 s
+            DWORD tvMs = 2000;
+            setsockopt(g_socket->GetConnectionSocket(),
+                       SOL_SOCKET, SO_RCVTIMEO,
+                       reinterpret_cast<const char*>(&tvMs), sizeof(tvMs));
+
+            PktDef probe;
+            probe.SetCmd(RESPONSE);
+            probe.SetBodyData(nullptr, 0);
+            probe.SetPktCount(1);
+            char* probeBuf = probe.GenPacket();
+            g_socket->SendData(probeBuf, probe.GetLength());
+
+            char recvBuf[1024] = {};
+            int  bytesIn = g_socket->GetData(recvBuf);
+
+            // Remove timeout so normal commands don't time out
+            tvMs = 0;
+            setsockopt(g_socket->GetConnectionSocket(),
+                       SOL_SOCKET, SO_RCVTIMEO,
+                       reinterpret_cast<const char*>(&tvMs), sizeof(tvMs));
+
+            reachable = (bytesIn > 0);
+            if (reachable)
+                appendLog("UDP probe OK – simulator responded (" +
+                          std::to_string(bytesIn) + " bytes) at " +
+                          ip + ":" + std::to_string(port));
+            else
+                appendLog("UDP – no probe response from " + ip + ":" +
+                          std::to_string(port) + " – check IP/port/VPN");
+        }
 
         crow::json::wvalue res;
-        res["status"]    = reachable ? "ok"           : "no_response";
-        res["simulator"] = reachable ? "reachable"    : "no_response";
+        res["status"]    = reachable ? "ok"        : "no_response";
+        res["simulator"] = reachable ? "reachable" : "no_response";
         res["ip"]        = ip;
         res["port"]      = port;
+        res["protocol"]  = useTCP ? "TCP" : "UDP";
         res["message"]   = reachable
-                           ? "Simulator responded – you are connected"
-                           : "Socket created but simulator did not respond – check IP/port/VPN";
+                           ? "Connected via " + std::string(useTCP ? "TCP" : "UDP")
+                           : "No response – check IP/port/VPN";
         return crow::response(reachable ? 200 : 202, res);
     });
 
@@ -670,25 +702,169 @@ int main()
     .methods(crow::HTTPMethod::Put)
     ([](const crow::request& req)
     {
-        // TODO: Person 2
-        //
-        // 1. Lock g_socketMtx, confirm g_socket != nullptr.
-        // 2. Parse req.body as JSON to determine cmd type.
-        // 3. Build a PktDef:
-        //      Drive  → SetCmd(DRIVE),  SetBodyData(&driveBody, sizeof(DriveBody))
-        //      Sleep  → SetCmd(SLEEP),  SetBodyData(nullptr, 0)
-        // 4. Call GenPacket() to get the raw buffer + GetLength().
-        // 5. Call g_socket->SendData(buf, len).
-        // 6. Call g_socket->GetData(recvBuf) to read ACK.
-        // 7. Parse ACK PktDef, check GetAck().
-        // 8. appendLog(...) with result.
-        // 9. Return { "ack": true/false, "pktCount": N }.
+        std::lock_guard<std::mutex> lk(g_socketMtx);
 
-        crow::json::wvalue stub;
-        stub["error"]   = "Not implemented – Person 2 TODO";
-        stub["ack"]     = false;
-        stub["pktCount"]= 0;
-        return crow::response(501, stub);
+        crow::json::wvalue out;
+
+        if (g_socket == nullptr)
+        {
+            out["error"] = "Not connected. Call POST /connect/<ip>/<port> first.";
+            out["ack"] = false;
+            out["pktCount"] = 0;
+            appendLog("Telecommand rejected: no socket (not connected)");
+            return crow::response(409, out);
+        }
+
+        // 2. Parse req.body as JSON to determine cmd type.
+        auto body = crow::json::load(req.body);
+        if (!body)
+        {
+            out["error"] = "Invalid JSON body.";
+            out["ack"] = false;
+            out["pktCount"] = 0;
+            appendLog("Telecommand rejected: invalid JSON body");
+            return crow::response(400, out);
+        }
+
+        if (!body.has("cmd") || body["cmd"].t() != crow::json::type::String)
+        {
+            out["error"] = "Missing or invalid 'cmd' field (expected string).";
+            out["ack"] = false;
+            out["pktCount"] = 0;
+            appendLog("Telecommand rejected: missing/invalid cmd");
+            return crow::response(400, out);
+        }
+
+        const std::string cmdStr = body["cmd"].s();
+
+        // 3. Build a PktDef:
+        PktDef pkt;
+        int expectedPktCount = 1; // simulator/probe uses 1; keep it simple/consistent
+        pkt.SetPktCount(expectedPktCount);
+
+        std::string logMsg;
+
+        if (cmdStr == "DRIVE")
+        {
+            // Validate fields
+            if (!body.has("direction") || !body.has("duration") || !body.has("power"))
+            {
+                out["error"] = "DRIVE requires {direction, duration, power}.";
+                out["ack"] = false;
+                out["pktCount"] = 0;
+                appendLog("Telecommand rejected: DRIVE missing fields");
+                return crow::response(400, out);
+            }
+
+            int direction = body["direction"].i();
+            int duration = body["duration"].i(); // UI sends ms, but packet expects 1-byte seconds in DriveBody
+            int power = body["power"].i();
+
+            // Basic sanity checks
+            if (direction < 1 || direction > 4)
+            {
+                out["error"] = "Invalid direction (expected 1..4).";
+                out["ack"] = false;
+                out["pktCount"] = 0;
+                appendLog("Telecommand rejected: invalid direction=" + std::to_string(direction));
+                return crow::response(400, out);
+            }
+
+            // Convert ms -> seconds (at least 1 second if non-zero)
+            int durSec = duration / 1000;
+            if (durSec <= 0) durSec = 1;
+            if (durSec > 255) durSec = 255;
+
+            if (power < 0) power = 0;
+            if (power > 100) power = 100;
+
+            pkt.SetCmd(DRIVE);
+
+            // PktDef.h defines two distinct body structs:
+            //   DriveBody  – for FORWARD(1) and BACKWARD(2): Direction, Duration(1-byte), Power
+            //   TurnBody   – for RIGHT(3) and LEFT(4):       Direction, Duration(2-byte unsigned short), no Power
+            if (direction == FORWARD || direction == BACKWARD)
+            {
+                DriveBody driveBody{};
+                driveBody.Direction = static_cast<unsigned char>(direction);
+                driveBody.Duration  = static_cast<unsigned char>(durSec);
+                driveBody.Power     = static_cast<unsigned char>(power);
+                pkt.SetBodyData(reinterpret_cast<char*>(&driveBody), sizeof(DriveBody));
+            }
+            else // RIGHT(3) or LEFT(4)
+            {
+                TurnBody turnBody{};
+                turnBody.Direction = static_cast<unsigned char>(direction);
+                turnBody.Duration  = static_cast<unsigned short>(durSec);
+                pkt.SetBodyData(reinterpret_cast<char*>(&turnBody), sizeof(TurnBody));
+            }
+
+            pkt.CalcCRC();
+
+            logMsg = "Sending DRIVE dir=" + std::to_string(direction) +
+                " durMs=" + std::to_string(duration) +
+                " (durSec=" + std::to_string(durSec) + ")" +
+                " power=" + std::to_string(power);
+        }
+        else if (cmdStr == "SLEEP")
+        {
+            pkt.SetCmd(SLEEP);
+            pkt.SetBodyData(nullptr, 0);
+            pkt.CalcCRC();
+
+            logMsg = "Sending SLEEP";
+        }
+        else
+        {
+            out["error"] = "Unknown cmd. Expected 'DRIVE' or 'SLEEP'.";
+            out["ack"] = false;
+            out["pktCount"] = 0;
+            appendLog("Telecommand rejected: unknown cmd='" + cmdStr + "'");
+            return crow::response(400, out);
+        }
+
+        // 4. Call GenPacket() to get the raw buffer + GetLength().
+        char* buf = pkt.GenPacket();
+        int   len = pkt.GetLength();
+
+        if (buf == nullptr || len <= 0)
+        {
+            out["error"] = "Failed to generate packet buffer.";
+            out["ack"] = false;
+            out["pktCount"] = 0;
+            appendLog("Telecommand error: GenPacket failed for cmd=" + cmdStr);
+            return crow::response(500, out);
+        }
+
+        // 5. Call g_socket->SendData(buf, len).
+        g_socket->SendData(buf, len);
+
+        // 6. Call g_socket->GetData(recvBuf) to read ACK.
+        char recvBuf[1024] = {};
+        int  bytesIn = g_socket->GetData(recvBuf);
+
+        if (bytesIn <= 0)
+        {
+            out["error"] = "No response/ACK received from simulator.";
+            out["ack"] = false;
+            out["pktCount"] = expectedPktCount;
+            appendLog(logMsg + " → NO ACK (bytesIn=" + std::to_string(bytesIn) + ")");
+            return crow::response(504, out);
+        }
+
+        // 7. Parse ACK PktDef, check GetAck().
+        PktDef ackPkt(recvBuf);
+        bool ack = ackPkt.GetAck();
+
+        // 8. appendLog(...) with result.
+        appendLog(logMsg + " → " + std::string(ack ? "ACK" : "NACK") +
+            " (recvBytes=" + std::to_string(bytesIn) +
+            ", pktCount=" + std::to_string(ackPkt.GetPktCount()) + ")");
+
+        // 9. Return { "ack": true/false, "pktCount": N }.
+        out["ack"] = ack;
+        out["pktCount"] = ackPkt.GetPktCount();
+        return crow::response(200, out);
     });
 
     // ----------------------------------------------------------
@@ -792,10 +968,15 @@ int main()
     // ----------------------------------------------------------
     // Launch the server
     // ----------------------------------------------------------
-    std::cout << "COIL Robot C2 GUI  –  http://localhost:8080/" << std::endl;
+    // Port can be overridden via command-line argument: WebServer.exe 9000
+    uint16_t serverPort = 8081;
+    if (argc > 1)
+        serverPort = static_cast<uint16_t>(std::atoi(argv[1]));
+
+    std::cout << "COIL Robot C2 GUI  –  http://localhost:" << serverPort << "/" << std::endl;
     std::cout << "Press Ctrl+C to stop." << std::endl;
 
-    app.port(8080)
+    app.port(serverPort)
        .multithreaded()
        .run();
 
