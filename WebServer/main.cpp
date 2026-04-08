@@ -59,6 +59,9 @@ static std::vector<std::string> g_packetLog;
 static std::mutex               g_logMtx;
 
 // Relay state (Config #3 – 3-PC relay)
+// Incrementing packet counter – must increase with every transmission
+static int         g_pktCount     = 1;
+
 static bool        g_relayEnabled = false;
 static std::string g_relayIP      = "";
 static int         g_relayPort    = 0;
@@ -394,7 +397,7 @@ static const std::string GUI_HTML = R"HTML(<!DOCTYPE html>
       <!-- Power slider -->
       <div class="slider-group">
         <label>Power <span id="powVal">100</span> %</label>
-        <input type="range" id="power" min="10" max="100" step="5" value="100"
+        <input type="range" id="power" min="80" max="100" step="5" value="100"
                oninput="document.getElementById('powVal').textContent=this.value">
       </div>
 
@@ -777,7 +780,7 @@ int main(int argc, char* argv[])
             PktDef probe;
             probe.SetCmd(RESPONSE);
             probe.SetBodyData(nullptr, 0);
-            probe.SetPktCount(1);
+            probe.SetPktCount(g_pktCount++);
             char* probeBuf = probe.GenPacket();
             g_socket->SendData(probeBuf, probe.GetLength());
 
@@ -867,7 +870,7 @@ int main(int argc, char* argv[])
 
         // 3. Build a PktDef:
         PktDef pkt;
-        int expectedPktCount = 1; // simulator/probe uses 1; keep it simple/consistent
+        int expectedPktCount = g_pktCount++;   // increment globally each send
         pkt.SetPktCount(expectedPktCount);
 
         std::string logMsg;
@@ -903,7 +906,7 @@ int main(int argc, char* argv[])
             if (durSec <= 0) durSec = 1;
             if (durSec > 255) durSec = 255;
 
-            if (power < 0) power = 0;
+            if (power < 80) power = 80;   // protocol requires 80-100%
             if (power > 100) power = 100;
 
             pkt.SetCmd(DRIVE);
@@ -921,10 +924,13 @@ int main(int argc, char* argv[])
             }
             else // RIGHT(3) or LEFT(4)
             {
-                TurnBody turnBody{};
-                turnBody.Direction = static_cast<unsigned char>(direction);
-                turnBody.Duration  = static_cast<unsigned short>(durSec);
-                pkt.SetBodyData(reinterpret_cast<char*>(&turnBody), sizeof(TurnBody));
+                // Manually serialize to avoid compiler padding between Direction(1 byte)
+                // and Duration(2 bytes) which would make sizeof(TurnBody)=4 instead of 3
+                char turnBuf[3];
+                turnBuf[0] = static_cast<unsigned char>(direction);
+                unsigned short durShort = static_cast<unsigned short>(durSec);
+                std::memcpy(&turnBuf[1], &durShort, 2);
+                pkt.SetBodyData(turnBuf, 3);
             }
 
             pkt.CalcCRC();
@@ -937,7 +943,9 @@ int main(int argc, char* argv[])
         else if (cmdStr == "SLEEP")
         {
             pkt.SetCmd(SLEEP);
-            pkt.SetBodyData(nullptr, 0);
+            // Pad to 8 bytes total (4 header + 3 body + 1 CRC) so simulator accepts it
+            char sleepPad[3] = {0, 0, 0};
+            pkt.SetBodyData(sleepPad, 3);
             pkt.CalcCRC();
 
             logMsg = "Sending SLEEP";
@@ -1053,8 +1061,10 @@ int main(int argc, char* argv[])
                 // 1. Build Status request (Status flag = 1)
                 PktDef statusReq;
                 statusReq.SetCmd(RESPONSE);  // Sets Status bit
-                statusReq.SetBodyData(nullptr, 0);
-                statusReq.SetPktCount(1);    // Set BEFORE CalcCRC so CRC includes count
+                // Pad to 8 bytes (4 header + 3 body + 1 CRC)
+                char statusPad[3] = {0, 0, 0};
+                statusReq.SetBodyData(statusPad, 3);
+                statusReq.SetPktCount(g_pktCount++); // increment globally each send
                 statusReq.CalcCRC();
 
                 char* reqBuf = statusReq.GenPacket();
